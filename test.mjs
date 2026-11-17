@@ -19,3 +19,26 @@ test('order status and price history survive later price changes',async()=>{awai
 test('saved orders remain after reopening application',async()=>{const another=await createApp({db});await new Promise(r=>another.listen(0,'127.0.0.1',r));const r=await fetch(`http://127.0.0.1:${another.address().port}/api/order/${token}`);assert.equal(r.status,200);assert.equal((await r.json()).details.total_cents,10950);await new Promise(r=>another.close(r));});
 test('logout invalidates session and login accepts only correct password',async()=>{await api('/api/admin/logout','POST',{});assert.equal((await api('/api/admin/orders')).status,401);assert.equal((await api('/api/admin/login','POST',{password:'wrong'})).status,401);assert.equal((await api('/api/admin/login','POST',{password:'a secure test password'})).status,200);});
 test('all referenced local assets, admin and checkout routes are available',async()=>{for(const route of ['/','/order','/admin','/o/'+token]){const r=await fetch(base+route);assert.equal(r.status,200);const html=await r.text();const assets=[...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map(m=>m[1].replaceAll('&amp;','&')).filter(x=>x.startsWith('/')&&!x.startsWith('/order'));for(const asset of new Set(assets))assert.equal((await fetch(base+asset)).status,200,asset);}});
+test('content editor updates shop, availability and pickup hours safely',async()=>{
+ const login=await api('/api/admin/login','POST',{password:'a secure test password'});cookie=login.cookie.split(';')[0];
+ const old=(await api('/api/settings')).data,content=structuredClone(old.content);content.title1='מתוקים';content.tagline='טעים בכל יום';content.flavors[0].name='טעם חדש';content.flavors[0].is_sold_out=true;content.hours[4].closed=true;
+ assert.equal((await api('/api/admin/content','PUT',{content:{...content,title1:'<script>bad</script>'},version:old.version})).status,400);
+ const r=await api('/api/admin/content','PUT',{content,version:old.version});assert.equal(r.status,200);version=r.data.version;
+ const html=await(await fetch(base+'/')).text();assert.match(html,/>מתוקים</);assert.match(html,/טעם חדש/);assert.match(html,/is_sold_out\\":true/);
+ assert.equal((await api('/api/orders','POST',payload())).status,400);
+ const p=payload();p.items[0].flavor_id='60a3eccb-5a39-4fc2-9ac0-3b2cab3ae58e';assert.equal((await api('/api/orders','POST',p)).data.field,'pickup');
+ assert.equal((await api('/api/admin/content','PUT',{content:old.content,version:old.version})).status,409);
+ await api('/api/admin/content','PUT',{content:old.content,version});
+});
+test('uploaded images persist and executable files are rejected',async()=>{
+ const {readFile}=await import('node:fs/promises');const bytes=await readFile('public/images/hero-donut.webp');
+ assert.equal((await api('/api/admin/media','POST',{data:Buffer.from('<svg onload="alert(1)">').toString('base64')})).status,400);
+ assert.equal((await api('/api/admin/media','POST',{data:bytes.toString('base64')},false)).status,401);
+ const r=await api('/api/admin/media','POST',{data:bytes.toString('base64')});assert.equal(r.status,201);
+ const media=await fetch(base+r.data.url);assert.equal(media.headers.get('content-type'),'image/webp');assert.deepEqual(Buffer.from(await media.arrayBuffer()),bytes);
+ const optimized=await fetch(base+'/_next/image?url='+encodeURIComponent(r.data.url)+'&w=640&q=75');assert.equal(optimized.status,200);
+});
+test('separate admin portal forwards authenticated requests and blocks cross-origin changes',async()=>{
+ const {createPortal}=await import('./portal.mjs');const portal=createPortal(base);await new Promise(r=>portal.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${portal.address().port}`;
+ try{assert.match(await(await fetch(url)).text(),/עריכת החנות/);assert.equal((await fetch(url+'/api/admin/orders',{headers:{Cookie:cookie}})).status,200);assert.equal((await fetch(url+'/api/admin/settings',{method:'PUT',headers:{Origin:'https://evil.example','Content-Type':'application/json',Cookie:cookie},body:'{}'})).status,403);assert.equal((await fetch(url+'/server.mjs')).status,404);}finally{await new Promise(r=>portal.close(r));}
+});

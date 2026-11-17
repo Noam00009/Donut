@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {defaultContent,initializeContent,validateContent,patchContent} from './content.mjs';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -14,14 +15,14 @@ const equal=(a,b)=>timingSafeEqual(Buffer.from(hash(a)),Buffer.from(hash(b)));
 export async function passwordHash(p){const salt=randomBytes(16).toString('hex');return salt+':'+(await scrypt(p,salt,64)).toString('hex');}
 async function passwordValid(p,s){if(typeof p!=='string'||p.length>200||!s)return false;const [salt,key]=s.split(':');return equal((await scrypt(p,salt,64)).toString('hex'),key);}
 const fail=(message,status=400,field)=>{throw Object.assign(new Error(message),{status,field});};
-async function body(req){let text='';for await(const chunk of req){text+=chunk;if(Buffer.byteLength(text)>16000)fail('הבקשה גדולה מדי',413);}try{return JSON.parse(text);}catch{fail('בקשה לא תקינה');}}
+async function body(req,max=32000){let text='';for await(const chunk of req){text+=chunk;if(Buffer.byteLength(text)>max)fail('הבקשה גדולה מדי',413);}try{return JSON.parse(text);}catch{fail('בקשה לא תקינה');}}
 function israelNow(now=new Date()){return new Date(now.toLocaleString('en-US',{timeZone:'Asia/Jerusalem'}));}
-export function validateOrder(b,now=new Date()){
+export function validateOrder(b,now=new Date(),content=defaultContent){
  if(typeof b.name!=='string'||b.name.trim().length<2||b.name.trim().length>80)fail('נא להזין שם מלא');
  const phone=String(b.phone||'').replace(/[\s-]/g,'').replace(/^\+972/,'0');if(!/^05\d{8}$/.test(phone))fail('מספר הטלפון אינו תקין');
  if(b.website)fail('הבקשה לא התקבלה');
  if(!Array.isArray(b.items)||!b.items.length||b.items.length>2)fail('הסל אינו תקין');
- const seen=new Set();let count=0;
+ const flavors=Object.fromEntries(content.flavors.filter(f=>!f.is_sold_out).map(f=>[f.id,f.name]));const hours=content.hours.map(h=>h.closed?null:[h.open,h.close].map(t=>{const [a,b]=t.split(':').map(Number);return a*60+b;}));const seen=new Set();let count=0;
  const items=b.items.map(x=>{if(!flavors[x.flavor_id]||seen.has(x.flavor_id)||!Number.isInteger(x.quantity)||x.quantity<1||x.quantity>48)fail('הסל אינו תקין');seen.add(x.flavor_id);count+=x.quantity;return {flavor_id:x.flavor_id,name:flavors[x.flavor_id],quantity:x.quantity};});
  if(count>48)fail('אפשר להזמין עד 48 דונאטס');
  if(!/^\d{4}-\d{2}-\d{2}$/.test(b.pickup_date||'')||!/^\d{2}:\d{2}$/.test(b.pickup_time||''))fail('נא לבחור מועד איסוף',400,'pickup');
@@ -46,8 +47,8 @@ export function patchHtml(html,pricing,bitPhone=''){
  return html.replace('<head>','<head><script>window.DONUT_CONFIG='+JSON.stringify({version:pricing.version,bitEnabled:!!bitPhone})+';</script><script src="/standalone.js"></script>');
 }
 export async function createApp({db=null,setupToken='',secure=false,bitPhone='',now=()=>new Date()}={}){
- if(db)await initialize(db);
- const settings=async()=>db?(await db.query('SELECT prices,version FROM settings WHERE id=1')).rows[0]:{prices:defaults,version:1};
+ if(db){await initialize(db);await initializeContent(db);}
+ const settings=async()=>db?(await db.query('SELECT prices,version,content FROM settings WHERE id=1')).rows[0]:{prices:defaults,version:1,content:defaultContent};
  async function limit(key,max,ms){const n=Date.now();await db.query('DELETE FROM rate_limits WHERE resets < $1',[n]);const r=await db.query(`INSERT INTO rate_limits(key,attempts,resets) VALUES($1,1,$2) ON CONFLICT(key) DO UPDATE SET attempts=rate_limits.attempts+1 RETURNING attempts`,[key,n+ms]);if(r.rows[0].attempts>max)fail('יותר מדי ניסיונות. נסו שוב בעוד מספר דקות.',429);}
  return http.createServer(async(req,res)=>{
   const send=(status,obj)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(obj));};
@@ -73,6 +74,8 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
    if(p==='/api/admin/login'&&req.method==='POST'){await limit('login:'+ip,10,900000);const b=await body(req),a=(await db.query('SELECT password_hash FROM admin_account WHERE id=1')).rows[0];if(!await passwordValid(b.password,a?.password_hash))fail('הסיסמה אינה נכונה',401);await session();return send(200,{ok:true});}
    if(p.startsWith('/api/admin/')){
     await auth();
+    if(p==='/api/admin/content'&&req.method==='PUT'){const b=await body(req);const content=validateContent(b.content);for(const url of [content.hero_image,...content.flavors.map(f=>f.image_url)])if(url.startsWith('/media/')&&!(await db.query('SELECT 1 FROM media WHERE id=$1',[url.split('/').pop()])).rows.length)fail('התמונה לא נמצאה. העלו אותה שוב.');const r=await db.query('UPDATE settings SET content=$1,version=version+1 WHERE id=1 AND version=$2 RETURNING prices,version,content',[content,b.version]);if(!r.rows.length)fail('התוכן עודכן בחלון אחר. רעננו ונסו שוב.',409);return send(200,r.rows[0]);}
+    if(p==='/api/admin/media'&&req.method==='POST'){const b=await body(req,2900000);if(typeof b.data!=='string'||(b.data.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(b.data)))fail('קובץ לא תקין');const bytes=Buffer.from(b.data,'base64');if(!bytes.length||bytes.length>2*1024*1024)fail('התמונה צריכה להיות עד 2MB');const type=bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))?'image/png':bytes[0]===255&&bytes[1]===216&&bytes[2]===255?'image/jpeg':bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP'?'image/webp':null;if(!type)fail('ניתן להעלות JPG, PNG או WebP בלבד');const id=randomBytes(16).toString('hex');await db.query('INSERT INTO media(id,mime,bytes) VALUES($1,$2,$3)',[id,type,bytes]);return send(201,{url:'/media/'+id});}
     if(p==='/api/admin/logout'&&req.method==='POST'){await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(cookie)]);res.setHeader('Set-Cookie',`donut_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure?'; Secure':''}`);return send(200,{ok:true});}
     if(p==='/api/admin/settings'&&req.method==='PUT'){const b=await body(req);for(const k of ['single_price','bundle_price'])if(typeof b[k]!=='number'||!Number.isFinite(b[k])||b[k]<1||b[k]>10000||Math.abs(b[k]*100-Math.round(b[k]*100))>1e-7)fail('המחיר חייב להיות בין 1 ל־10,000 ₪, עד שתי ספרות אחרי הנקודה');if(b.bundle_price>b.single_price*12)fail('מחיר מארז לא יכול להיות גבוה ממחיר 12 יחידות');const r=await db.query('UPDATE settings SET prices=$1, version=version+1 WHERE id=1 AND version=$2 RETURNING prices,version',[{single_price:b.single_price,bundle_price:b.bundle_price,bundle_size:12},b.version]);if(!r.rows.length)fail('המחירים השתנו בחלון אחר. רעננו ונסו שוב.',409);return send(200,r.rows[0]);}
     if(p==='/api/admin/orders'&&req.method==='GET'){const before=Number(u.searchParams.get('before')||Number.MAX_SAFE_INTEGER);if(!Number.isSafeInteger(before)||before<1)fail('עמוד לא תקין');const rows=(await db.query('SELECT id,details,status,created_at FROM orders WHERE id<$1 ORDER BY id DESC LIMIT 101',[before])).rows;const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Jerusalem',year:'numeric',month:'2-digit',day:'2-digit'}).format(now());const summary=(await db.query("SELECT MAX(id) AS latest, COUNT(*) FILTER(WHERE status='new') AS new_count, COUNT(*) FILTER(WHERE status IN ('new','preparing','ready')) AS active_count, COALESCE(SUM((details->>'count')::int) FILTER(WHERE details->>'pickup_date'=$1 AND status NOT IN ('cancelled','collected')),0) AS donut_count FROM orders",[today])).rows[0];return send(200,{orders:rows.slice(0,100),hasMore:rows.length>100,latest:Number(summary.latest||0),summary});}
@@ -82,11 +85,11 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
    if(p==='/api/orders'&&req.method==='POST'){
     await limit('order:'+ip,20,600000);if(!(await db.query('SELECT 1 FROM admin_account')).rows.length)fail('החנות עדיין אינה פתוחה לקבלת הזמנות',503);
     const b=await body(req);if(!/^[a-f0-9-]{36}$/.test(b.client_id||''))fail('נא לרענן את הדף ולנסות שוב');
-    const details=validateOrder(b,now());if(details.payment_method==='bit'&&!bitPhone)fail('תשלום בביט טרם הוגדר. ניתן לשלם במזומן באיסוף.');
+    const current=await settings();const details=validateOrder(b,now(),current.content);details.pickup_address=current.content.address;if(details.payment_method==='bit'&&!bitPhone)fail('תשלום בביט טרם הוגדר. ניתן לשלם במזומן באיסוף.');
     const fingerprint=hash(JSON.stringify(details));
     const r=await db.transaction(async c=>{
      const existing=(await c.query('SELECT id,token,fingerprint FROM orders WHERE client_id=$1',[b.client_id])).rows[0];if(existing){if(existing.fingerprint!==fingerprint)fail('מזהה הזמנה כבר בשימוש',409);return existing;}
-     const s=(await c.query('SELECT prices,version FROM settings WHERE id=1 FOR SHARE')).rows[0];if(b.price_version!==s.version)fail('המחירים עודכנו. רעננו את הדף כדי לאשר את המחיר החדש.',409);
+     const s=(await c.query('SELECT prices,version,content FROM settings WHERE id=1 FOR SHARE')).rows[0];if(b.price_version!==s.version)fail('המחירים עודכנו. רעננו את הדף כדי לאשר את המחיר החדש.',409);
      details.total_cents=totalFor(details.count,s.prices);details.prices=s.prices;
      const token=randomBytes(24).toString('hex');
      const result=await c.query('INSERT INTO orders(token,client_id,fingerprint,details) VALUES($1,$2,$3,$4) ON CONFLICT(client_id) DO NOTHING RETURNING id,token,fingerprint',[token,b.client_id,fingerprint,details]);
@@ -98,6 +101,7 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
    if(!['GET','HEAD'].includes(req.method))fail('פעולה לא נתמכת',405);
    let pathname=decodeURIComponent(p);
    if(p==='/_next/image')pathname=u.searchParams.get('url')||'';
+   if(/^\/media\/[a-f0-9]{32}$/.test(pathname)){const image=db?(await db.query('SELECT mime,bytes FROM media WHERE id=$1',[pathname.split('/').pop()])).rows[0]:null;if(!image)fail('תמונה לא נמצאה',404);res.writeHead(200,{'Content-Type':image.mime,'Cache-Control':'public, max-age=31536000, immutable'});return res.end(Buffer.from(image.bytes));}
    if(pathname==='/')pathname='/index.html';
    if(['/order','/order/'].includes(pathname))pathname='/order/index.html';
    if(['/admin','/admin/'].includes(pathname))pathname='/admin.html';
@@ -105,7 +109,7 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
    if(!pathname.startsWith('/')||pathname.includes('\0'))fail('לא נמצא',404);
    const filename=path.resolve(root,'.'+pathname);if(!filename.startsWith(root))fail('לא נמצא',404);
    let data=await readFile(filename);
-   if(filename===root+'index.html'||filename===root+'order/index.html')data=Buffer.from(patchHtml(data.toString(),await settings(),bitPhone));
+   if(filename===root+'index.html'||filename===root+'order/index.html'){const config=await settings();data=Buffer.from(patchContent(patchHtml(data.toString(),config,bitPhone),config.content));}
    res.writeHead(200,{'Content-Type':mime[path.extname(filename)]||'application/octet-stream','Cache-Control':/\.(html|js)$/.test(filename)?'no-store':'public, max-age=86400'});res.end(req.method==='HEAD'?undefined:data);
   }catch(e){if(res.headersSent){res.end();return;}const status=e.status||(e.code==='ENOENT'?404:500);if(status===500)console.error('Request failed:',e.code||e.name);send(status,{ok:false,message:status===500?'אירעה תקלה זמנית. נסו שוב.':e.message,field:e.field});}
  });

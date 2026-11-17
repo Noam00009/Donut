@@ -52,3 +52,21 @@ memory. Tests cover auth, CSRF origin checks, setup locking, session revocation,
 server-side totals, price version conflicts, idempotency, order-status changes,
 application restart persistence and local asset routes. No production orders are
 created by the tests. A final live smoke test is required after Blueprint approval.
+
+## Content editor and separate admin site
+
+The admin site's `portal.mjs` entry point serves the protected dashboard at its own
+root URL, with SHOP_URL pointing to the main shop. It forwards only admin APIs,
+public settings and media to the shop; database credentials remain on the shop.
+Host-only HttpOnly session cookies authenticate portal requests. Cross-origin
+mutations are rejected before forwarding.
+
+The editor changes headline, subtitle, intro, address, hero photo, each of the two
+flavors' name/description/photo/availability, and all seven days' opening hours.
+Images (JPEG, PNG, WebP, up to 2MB) are stored in PostgreSQL, not the ephemeral
+Render filesystem. Shop data and checkout validation share the same versioned
+content. Changes are published by the explicit save action. Existing order
+snapshots retain the original names, address and prices.
+
+Run `node portal.mjs` for the separate admin website. Fourteen integration tests
+cover the complete admin, CMS, uploads, order validation and proxy behavior.
