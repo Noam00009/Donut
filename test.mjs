@@ -42,3 +42,11 @@ test('separate admin portal forwards authenticated requests and blocks cross-ori
  const {createPortal}=await import('./portal.mjs');const portal=createPortal(base);await new Promise(r=>portal.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${portal.address().port}`;
  try{assert.match(await(await fetch(url)).text(),/עריכת החנות/);assert.equal((await fetch(url+'/api/admin/orders',{headers:{Cookie:cookie}})).status,200);assert.equal((await fetch(url+'/api/admin/settings',{method:'PUT',headers:{Origin:'https://evil.example','Content-Type':'application/json',Cookie:cookie},body:'{}'})).status,403);assert.equal((await fetch(url+'/server.mjs')).status,404);}finally{await new Promise(r=>portal.close(r));}
 });
+test('maintenance blocks all writes while health checks do not wake the database',async()=>{
+ const paused=await createApp({db,maintenance:true});await new Promise(r=>paused.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${paused.address().port}`;
+ try{const h=await fetch(url+'/health');assert.equal((await h.json()).maintenance,true);for(const route of ['/api/orders','/api/admin/setup','/api/admin/settings'])assert.equal((await fetch(url+route,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,503);assert.equal((await fetch(url+'/')).status,200);}finally{await new Promise(r=>paused.close(r));}
+});
+test('database migration preserves orders, password, sessions, content and image bytes and is retry safe',async()=>{
+ const {migrateDatabase}=await import('./migrate.mjs');const target=new PGlite();
+ try{const counts=await migrateDatabase(db,target);assert.equal(counts.orders,1);assert.equal(counts.media,1);for(const table of ['settings','admin_account','sessions','rate_limits','orders','media'])assert.deepEqual((await target.query('SELECT * FROM '+table)).rows,(await db.query('SELECT * FROM '+table)).rows);assert.deepEqual(await migrateDatabase(db,target),counts);assert.equal(Number((await target.query("SELECT nextval('orders_id_seq') AS n")).rows[0].n),2);}finally{await target.close();}
+});

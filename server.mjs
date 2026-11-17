@@ -46,7 +46,7 @@ export function patchHtml(html,pricing,bitPhone=''){
  html=html.replace(/8 ₪/g,fmt(pricing.prices.single_price)+' ₪').replace(/90 ₪/g,fmt(pricing.prices.bundle_price)+' ₪').replace(/96 ₪/g,fmt(pricing.prices.single_price*12)+' ₪');
  return html.replace('<head>','<head><script>window.DONUT_CONFIG='+JSON.stringify({version:pricing.version,bitEnabled:!!bitPhone})+';</script><script src="/standalone.js"></script>');
 }
-export async function createApp({db=null,setupToken='',secure=false,bitPhone='',now=()=>new Date()}={}){
+export async function createApp({db=null,setupToken='',secure=false,bitPhone='',now=()=>new Date(),maintenance=false}={}){
  if(db){await initialize(db);await initializeContent(db);}
  const settings=async()=>db?(await db.query('SELECT prices,version,content FROM settings WHERE id=1')).rows[0]:{prices:defaults,version:1,content:defaultContent};
  async function limit(key,max,ms){const n=Date.now();await db.query('DELETE FROM rate_limits WHERE resets < $1',[n]);const r=await db.query(`INSERT INTO rate_limits(key,attempts,resets) VALUES($1,1,$2) ON CONFLICT(key) DO UPDATE SET attempts=rate_limits.attempts+1 RETURNING attempts`,[key,n+ms]);if(r.rows[0].attempts>max)fail('יותר מדי ניסיונות. נסו שוב בעוד מספר דקות.',429);}
@@ -56,7 +56,8 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
   try{
    const u=new URL(req.url,'http://localhost'),p=u.pathname,mutating=!['GET','HEAD'].includes(req.method);
    if(mutating){const origin=req.headers.origin;if(origin&&new URL(origin).host!==req.headers.host)fail('הבקשה נדחתה',403);if(req.headers['sec-fetch-site']==='cross-site')fail('הבקשה נדחתה',403);if(!req.headers['content-type']?.startsWith('application/json'))fail('נדרש JSON',415);}
-   if(p==='/health'){if(db)await db.query('SELECT 1');return send(200,{ok:true,database:!!db});}
+   if(p==='/health')return send(200,{ok:true,database:!!db,maintenance});
+   if(maintenance&&mutating&&p.startsWith('/api/')){res.setHeader('Retry-After','120');fail('המערכת מתעדכנת כרגע. נסו שוב בעוד מספר דקות.',503);}
    if(p==='/api/settings'&&req.method==='GET')return send(200,await settings());
    if(p.startsWith('/api/')&&!db)fail('מערכת ההזמנות עדיין בתהליך חיבור. נסו שוב מאוחר יותר.',503);
    const ip=hash(req.headers['x-forwarded-for']?.split(',').pop()?.trim()||req.socket.remoteAddress||'');
@@ -115,7 +116,14 @@ export async function createApp({db=null,setupToken='',secure=false,bitPhone='',
  });
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
- const db=process.env.DATABASE_URL?postgres(process.env.DATABASE_URL):null;
- const server=await createApp({db,setupToken:process.env.ADMIN_SETUP_TOKEN,secure:process.env.NODE_ENV==='production',bitPhone:process.env.BIT_PHONE||''});
+ let db=process.env.DATABASE_URL?postgres(process.env.DATABASE_URL):null;
+ if(process.env.MIGRATION_TARGET_URL){
+  if(process.env.MAINTENANCE_MODE!=='true'||!db)throw new Error('Migration requires maintenance and source database');
+  const target=postgres(process.env.MIGRATION_TARGET_URL);
+  const {migrateDatabase}=await import('./migrate.mjs');
+  console.log('Database migration verified:',JSON.stringify(await migrateDatabase(db,target)));
+  await db.close();db=target;
+ }
+ const server=await createApp({db,setupToken:process.env.ADMIN_SETUP_TOKEN,secure:process.env.NODE_ENV==='production',bitPhone:process.env.BIT_PHONE||'',maintenance:process.env.MAINTENANCE_MODE==='true'});
  server.listen(Number(process.env.PORT)||3000,'0.0.0.0');process.on('SIGTERM',()=>server.close(async()=>{if(db)await db.close();process.exit(0);}));
 }
