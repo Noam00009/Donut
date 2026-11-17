@@ -1,39 +1,54 @@
-# Donutan frontend replica
+# Donutan shop and admin
 
-Standalone snapshot of the public home and checkout screens at
-https://donutan-yejq.vercel.app/, captured 2026-11-17. Includes the original
-public browser bundles, CSS, images and fonts; original React/Next source and
-private backend are not available from the public website.
+Hebrew RTL donut storefront with a matching pink, chocolate and cream admin UI.
+Public source snapshot captured 2026-11-17, with original browser bundles and local
+assets; the new server, admin dashboard, order APIs and confirmation page are editable source.
 
 ## Run
 
-Node.js 22 or later, no dependencies:
+Node 22+, `npm ci`, then `npm start`. In development without DATABASE_URL the public
+storefront is available, but orders and administration fail closed. For full operation
+set DATABASE_URL to PostgreSQL and ADMIN_SETUP_TOKEN to a cryptographically random
+one-time setup code. Set NODE_ENV=production for secure session cookies on HTTPS.
 
-```
-npm start
-```
+Visit `/admin`, enter the setup code and choose a password (at least 12 characters).
+Setup closes permanently after the first administrator is created. Passwords use
+salted scrypt hashes; session tokens are stored hashed and expire after 12 hours.
+Never commit credentials or share the setup code publicly.
 
-Open http://localhost:3000. Run `npm test` for route, asset and order-isolation checks.
+## Features
 
-## Render
+- `/admin`: password-protected dashboard, all orders with pagination, search,
+  status filters, global summary counts, status updates and shared unit/bundle prices.
+- New orders refresh every 5 seconds while the admin screen is open; an in-app
+  notification appears and sound can be enabled by clicking the bell. No background
+  push notifications are sent while the browser is closed.
+- PostgreSQL stores orders, immutable price snapshots, administrator credentials,
+  sessions and versioned prices independently of web-service restarts.
+- Public checkout validates Israeli mobile numbers, quantities, business hours and
+  preparation lead time. Amounts are calculated on the server in integer agorot.
+- Idempotency keys prevent duplicate orders after request retries. Stale prices are
+  rejected for explicit customer review. Open shop pages reload new prices within
+  10 seconds; checkout shows a refresh prompt to preserve entered information.
+- Customer receipt at `/o/<random-token>` shows the saved order and status.
+- Cash on pickup works by default. Bit is disabled until BIT_PHONE is configured.
+  Customer claims of Bit payment are shown as unverified, never as confirmed payment.
+- Customer information is not sent to the original site's backend.
 
-Push this directory to a GitHub repository, then create a Render Node web service:
-build command `npm install --ignore-scripts`, start command `npm start`, health
-check `/health`. PORT is provided by Render. No database or paid service is created
-by this package.
+## Deploy
 
-## Current scope
+render.yaml adopts the existing donutan-site service and donutan-orders Postgres in
+Noam's workspace, Frankfurt. DATABASE_URL is wired internally via fromDatabase.
+ADMIN_SETUP_TOKEN is managed separately in Render's environment; it is deliberately
+omitted from the Blueprint so future syncs preserve it.
 
-Home design, animation, local cart, quantity controls, bundle pricing, checkout
-fields and pickup time selection use the captured frontend. All assets are local.
-Cross-page links use full-page navigation to avoid the original Next server.
+The free database created 2026-11-17 expires 2026-12-17. Upgrade or migrate before
+expiry for continued storage. Do not rely on the free tier for a permanent business.
 
-Actual order submission is deliberately disabled (HTTP 503 with an explanatory
-Hebrew message). No customer data is sent to the original merchant. No order is
-falsely confirmed. A separate authenticated order backend and durable storage,
-merchant notifications and confirmation screen must be implemented before launch.
-The original Bit phone is removed from the rendered pages; BIT_PHONE may be set
-only to the intended merchant's number after verification. This does not process
-or confirm payment.
+## Tests
 
-Deployment pending: intended Render workspace and a writable GitHub repository.
+`npm test` runs integration tests against embedded PostgreSQL (PGlite) in isolated
+memory. Tests cover auth, CSRF origin checks, setup locking, session revocation,
+server-side totals, price version conflicts, idempotency, order-status changes,
+application restart persistence and local asset routes. No production orders are
+created by the tests. A final live smoke test is required after Blueprint approval.

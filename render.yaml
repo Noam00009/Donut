@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: donutan-site
+    runtime: node
+    region: frankfurt
+    plan: free
+    repo: https://github.com/Noam00009/Donut
+    branch: admin-dashboard
+    buildCommand: npm ci --include=dev && npm test
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: donutan-orders
+          property: connectionString
+
+databases:
+  - name: donutan-orders
+    databaseName: donutan_orders
+    user: donutan_orders_user
+    postgresMajorVersion: '17'
+    region: frankfurt
+    plan: free
+    ipAllowList: []

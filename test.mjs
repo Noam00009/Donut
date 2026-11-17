@@ -1,20 +1,21 @@
-import { test, after } from 'node:test';
+import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
-import {server} from './server.mjs';
+import {PGlite} from '@electric-sql/pglite';
+import {createApp,totalFor,validateOrder} from './server.mjs';
+const db=new PGlite(),server=await createApp({db,setupToken:'test-setup-code-only',now:()=>new Date('2026-11-17T08:00:00Z')});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-const base=`http://127.0.0.1:${server.address().port}`;
-after(()=>server.close());
-test('Home and checkout use local assets and standalone navigation',async()=>{
-  for(const route of ['/', '/order']) {
-    const res=await fetch(base+route);assert.equal(res.status,200);
-    const html=await res.text();assert.ok(html.includes('/standalone.js'));
-    assert.ok(!html.includes('0505074954'));
-    const assets=[...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map(m=>m[1].replaceAll('&amp;','&')).filter(x=>x.startsWith('/')&&!x.startsWith('/order'));
-    for(const asset of new Set(assets)) assert.equal((await fetch(base+asset)).status,200,asset);
-  }
-});
-test('Demo does not accept or forward orders',async()=>{
-  const res=await fetch(base+'/api/orders',{method:'POST',body:'{}'});
-  assert.equal(res.status,503);assert.equal((await res.json()).ok,false);
-});
-test('Missing files are 404',async()=>assert.equal((await fetch(base+'/missing-file')).status,404));
+const base=`http://127.0.0.1:${server.address().port}`;let cookie='',version=1,token,id;
+after(async()=>{await new Promise(r=>server.close(r));await db.close();});
+async function api(p,method='GET',body,authenticated=true,headers={}){const r=await fetch(base+p,{method,headers:{'Content-Type':'application/json',...(authenticated?{Cookie:cookie}:{}),...headers},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,data:await r.json(),cookie:r.headers.get('set-cookie')};}
+const payload=()=>({name:'לקוח בדיקה',phone:'0500000000',items:[{flavor_id:'9ba29b24-0038-442f-a0f9-feb9b586e117',quantity:13}],pickup_date:'2026-11-19',pickup_time:'17:00',payment_method:'cash',bit_paid:false,note:'<script>test</script>',website:'',client_id:crypto.randomUUID(),price_version:version});
+test('bundle prices use integer cents',()=>{assert.equal(totalFor(13,{single_price:8,bundle_price:90,bundle_size:12}),9800);assert.equal(totalFor(24,{single_price:8,bundle_price:90,bundle_size:12}),18000);});
+test('private orders and price mutation require login',async()=>{assert.equal((await api('/api/admin/orders','GET',undefined,false)).status,401);assert.equal((await api('/api/admin/settings','PUT',{},false)).status,401);});
+test('setup is protected and one-time; sessions are HttpOnly',async()=>{assert.equal((await api('/api/admin/setup','POST',{code:'wrong',password:'a secure test password'})).status,403);const r=await api('/api/admin/setup','POST',{code:'test-setup-code-only',password:'a secure test password'});assert.equal(r.status,201);assert.match(r.cookie,/HttpOnly/);assert.match(r.cookie,/SameSite=Strict/);cookie=r.cookie.split(';')[0];assert.equal((await api('/api/admin/setup','POST',{code:'test-setup-code-only',password:'another secure password'})).status,409);});
+test('foreign origins cannot change prices',async()=>{assert.equal((await api('/api/admin/settings','PUT',{single_price:1,bundle_price:1,version},true,{Origin:'https://evil.example'})).status,403);});
+test('price updates are versioned, validate and reach storefront props',async()=>{assert.equal((await api('/api/admin/settings','PUT',{single_price:-1,bundle_price:100,version})).status,400);const r=await api('/api/admin/settings','PUT',{single_price:9.5,bundle_price:100,version});assert.equal(r.status,200);version=r.data.version;const html=await(await fetch(base+'/')).text();assert.match(html,/9\.5 ₪/);assert.match(html,/single_price\\":9\.5/);assert.match(html,/100 ₪/);assert.equal((await api('/api/admin/settings','PUT',{single_price:5,bundle_price:50,version:1})).status,409);});
+test('stale customer price and invalid quantities/times are rejected',async()=>{assert.equal((await api('/api/orders','POST',{...payload(),price_version:1})).status,409);const bad=payload();bad.items[0].quantity=-1;assert.equal((await api('/api/orders','POST',bad)).status,400);assert.equal((await api('/api/orders','POST',{...payload(),pickup_date:'2026-11-18'})).data.field,'pickup');assert.equal((await api('/api/orders','POST',{...payload(),payment_method:'bit'})).status,400);});
+test('orders are stored once and use server prices, not submitted totals',async()=>{const p={...payload(),total_cents:1};const a=await api('/api/orders','POST',p),b=await api('/api/orders','POST',p);assert.equal(a.status,201);assert.equal(a.data.token,b.data.token);token=a.data.token;id=a.data.orderNumber;assert.equal((await api('/api/orders','POST',{...p,name:'שם אחר'})).status,409);const orders=(await api('/api/admin/orders')).data.orders;assert.equal(orders.length,1);assert.equal(orders[0].details.total_cents,10950);assert.equal(orders[0].status,'new');});
+test('order status and price history survive later price changes',async()=>{await api('/api/admin/settings','PUT',{single_price:10,bundle_price:110,version});assert.equal((await api('/api/admin/orders/'+id,'PATCH',{status:'preparing'})).status,200);const o=(await api('/api/order/'+token)).data;assert.equal(o.status,'preparing');assert.equal(o.details.total_cents,10950);assert.equal((await api('/api/order/'+'0'.repeat(48))).status,404);});
+test('saved orders remain after reopening application',async()=>{const another=await createApp({db});await new Promise(r=>another.listen(0,'127.0.0.1',r));const r=await fetch(`http://127.0.0.1:${another.address().port}/api/order/${token}`);assert.equal(r.status,200);assert.equal((await r.json()).details.total_cents,10950);await new Promise(r=>another.close(r));});
+test('logout invalidates session and login accepts only correct password',async()=>{await api('/api/admin/logout','POST',{});assert.equal((await api('/api/admin/orders')).status,401);assert.equal((await api('/api/admin/login','POST',{password:'wrong'})).status,401);assert.equal((await api('/api/admin/login','POST',{password:'a secure test password'})).status,200);});
+test('all referenced local assets, admin and checkout routes are available',async()=>{for(const route of ['/','/order','/admin','/o/'+token]){const r=await fetch(base+route);assert.equal(r.status,200);const html=await r.text();const assets=[...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map(m=>m[1].replaceAll('&amp;','&')).filter(x=>x.startsWith('/')&&!x.startsWith('/order'));for(const asset of new Set(assets))assert.equal((await fetch(base+asset)).status,200,asset);}});

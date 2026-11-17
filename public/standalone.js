@@ -1,8 +1,10 @@
-document.addEventListener('click', function (event) {
-  const link=event.target.closest('a[href]');
-  if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-  const target=new URL(link.href,location.href);
-  if (target.origin===location.origin && target.pathname!==location.pathname) {
-    event.preventDefault();event.stopImmediatePropagation();location.assign(target.href);
-  }
-},true);
+document.addEventListener('click',function(event){const link=event.target.closest('a[href]');if(!link||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;const target=new URL(link.href,location.href);if(target.origin===location.origin&&target.pathname!==location.pathname){event.preventDefault();event.stopImmediatePropagation();location.assign(target.href);}},true);
+const originalFetch=window.fetch.bind(window);
+window.fetch=async function(input,init){const url=typeof input==='string'?input:input.url;if(url==='/api/orders'&&init?.method==='POST'){
+ const data=JSON.parse(init.body),saved=JSON.parse(sessionStorage.getItem('donut_pending_order')||'null');const fingerprint=JSON.stringify(data),client_id=saved?.fingerprint===fingerprint?saved.client_id:crypto.randomUUID();sessionStorage.setItem('donut_pending_order',JSON.stringify({fingerprint,client_id}));data.client_id=client_id;data.price_version=window.DONUT_CONFIG.version;
+ const res=await originalFetch(input,{...init,body:JSON.stringify(data)}),result=await res.clone().json();if(res.ok&&result.ok){sessionStorage.removeItem('donut_pending_order');setTimeout(()=>location.assign('/o/'+result.token),200);}return res;
+ }return originalFetch(input,init);};
+// Prices update on all open pages without dropping the cart, which the original
+// storefront keeps in local storage. Do not reload while a customer fills a form.
+setInterval(async()=>{try{const r=await originalFetch('/api/settings');if(!r.ok)return;const s=await r.json();if(s.version!==window.DONUT_CONFIG.version){if(location.pathname!=='/order'){location.reload();return;}if(!document.getElementById('price-update')){const note=document.createElement('div');note.id='price-update';note.setAttribute('role','alert');note.style='position:fixed;top:0;left:0;right:0;background:#321b12;color:#fff4e5;padding:16px;text-align:center;z-index:9999';note.textContent='המחירים עודכנו. יש לרענן את הדף לפני שליחת ההזמנה. ';const button=document.createElement('button');button.textContent='רענון למחירים החדשים';button.onclick=()=>location.reload();note.append(button);document.body.append(note);}}}catch{}},10000);
+document.addEventListener('DOMContentLoaded',()=>{if(window.DONUT_CONFIG.bitEnabled)return;const disable=()=>{for(const e of document.querySelectorAll('[role="radio"]'))if(e.textContent.includes('ביט')){e.disabled=true;e.setAttribute('aria-disabled','true');e.title='תשלום בביט טרם הוגדר';}};new MutationObserver(disable).observe(document.body,{childList:true,subtree:true});disable();});
