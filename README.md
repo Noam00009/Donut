@@ -37,13 +37,29 @@ Never commit credentials or share the setup code publicly.
 
 ## Deploy
 
-render.yaml adopts the existing donutan-site service and donutan-orders Postgres in
-Noam's workspace, Frankfurt. DATABASE_URL is wired internally via fromDatabase.
-ADMIN_SETUP_TOKEN is managed separately in Render's environment; it is deliberately
-omitted from the Blueprint so future syncs preserve it.
+The shop and admin run on one free Render web service, with `/admin` as the
+management URL. DATABASE_URL is a pooled Neon PostgreSQL connection, set privately
+in Render. Neon project donutan (broad-sky-94691606), Frankfurt, belongs to the
+Noam Free organization. No credentials are committed.
 
-The free database created 2026-11-17 expires 2026-12-17. Upgrade or migrate before
-expiry for continued storage. Do not rely on the free tier for a permanent business.
+Neon Free has usage/storage limits rather than a 30-day database expiry. Render
+free web services sleep when idle and share 750 instance hours per workspace.
+The health endpoint checks process readiness without querying PostgreSQL, so
+platform health probes do not consume continuous database compute. Startup
+verifies the database before listening. Actual API failures return errors.
+
+The legacy admin portal supports REDIRECT_ADMIN=true to redirect old bookmarks
+to the shop's /admin. Suspend this legacy service once users use the new URL.
+The old Render database is retained temporarily for rollback, not used for new
+orders after migration. Blueprint auto-sync is paused during the migration;
+DATABASE_URL is manual so a sync cannot restore the old database binding.
+
+Migration procedure: deploy MAINTENANCE_MODE=true, verify health and rejected
+writes, allow old requests to drain, then set MIGRATION_TARGET_URL to a direct
+Neon URL. Startup copies all tables in transactions and checks counts, retaining
+an idempotent receipt. After validation set DATABASE_URL to the pooled Neon URL,
+clear MIGRATION_TARGET_URL and set MAINTENANCE_MODE=false. Existing passwords,
+orders, images and settings are preserved. The source database is not erased.
 
 ## Tests
 

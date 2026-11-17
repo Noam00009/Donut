@@ -50,3 +50,7 @@ test('database migration preserves orders, password, sessions, content and image
  const {migrateDatabase}=await import('./migrate.mjs');const target=new PGlite();
  try{const counts=await migrateDatabase(db,target);assert.equal(counts.orders,1);assert.equal(counts.media,1);for(const table of ['settings','admin_account','sessions','rate_limits','orders','media'])assert.deepEqual((await target.query('SELECT * FROM '+table)).rows,(await db.query('SELECT * FROM '+table)).rows);assert.deepEqual(await migrateDatabase(db,target),counts);assert.equal(Number((await target.query("SELECT nextval('orders_id_seq') AS n")).rows[0].n),2);}finally{await target.close();}
 });
+test('old admin address redirects without querying or proxying the database',async()=>{
+ const {createPortal}=await import('./portal.mjs');const redirect=createPortal(base,{redirectOnly:true});await new Promise(r=>redirect.listen(0,'127.0.0.1',r));
+ try{const r=await fetch(`http://127.0.0.1:${redirect.address().port}/`,{redirect:'manual'});assert.equal(r.status,302);assert.equal(r.headers.get('location'),base+'/admin');}finally{await new Promise(r=>redirect.close(r));}
+});
